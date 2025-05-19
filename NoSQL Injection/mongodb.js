@@ -1,90 +1,105 @@
 const express = require('express');
-const config = require('../config')
-const router = express.Router()
-
+const config = require('../config');
+const router = express.Router();
 const MongoClient = require('mongodb').MongoClient;
+const mongoSanitize = require('mongo-sanitize');
+const rateLimit = require('express-rate-limit');
+
 const url = config.MONGODB_URI;
 
+// Optional: Add basic rate-limiting to prevent abuse
+const loginLimiter = rateLimit({
+    windowMs: 1 * 60 * 1000, // 1 minute
+    max: 5,
+    message: { status: "Error", message: "Too many login attempts, please try again later." }
+});
+
+function validateStringInput(input) {
+    return typeof input === 'string' && input.trim().length > 0;
+}
+
+// Register customer
 router.post('/customers/register', async (req, res) => {
+    const name = mongoSanitize(req.body.name);
+    const address = mongoSanitize(req.body.address);
 
-    const client = await MongoClient.connect(url, { useNewUrlParser: true })
-        .catch(err => { console.log(err); });
-    if (!client) {
-        return res.json({ status: "Error" });
+    if (!validateStringInput(name) || !validateStringInput(address)) {
+        return res.status(400).json({ status: "Error", message: "Invalid input." });
     }
-    const db = client.db(config.MONGODB_DB_NAME);
-    const customers = db.collection("customers")
-    
-    let myobj = { name: req.body.name, address: req.body.address };
-    customers.insertOne(myobj, function (err) {
-        if (err) throw err;
-        console.log("user registered");
-        res.json({ status:"success", "message": "user inserted" })
-        db.close();
-    });
-    
-})
 
+    let client;
+    try {
+        client = await MongoClient.connect(url, { useNewUrlParser: true });
+        const db = client.db(config.MONGODB_DB_NAME);
+        const customers = db.collection("customers");
 
-// Vulnerable search function
+        const newCustomer = { name, address };
+        await customers.insertOne(newCustomer);
+
+        res.json({ status: "Success", message: "User registered." });
+    } catch (err) {
+        console.error("Registration error:", err);
+        res.status(500).json({ status: "Error", message: "Internal server error." });
+    } finally {
+        if (client) client.close();
+    }
+});
+
+// Find customer by name
 router.post('/customers/find', async (req, res) => {
+    const name = mongoSanitize(req.body.name);
 
-    const client = await MongoClient.connect(url, { useNewUrlParser: true })
-        .catch(err => { console.log(err); });
-    if (!client) {
-        return res.json({ status: "Error" });
+    if (!validateStringInput(name)) {
+        return res.status(400).json({ status: "Error", message: "Invalid input." });
     }
-    const db = client.db(config.MONGODB_DB_NAME);
-    const customers = db.collection("customers")
 
-    let name = req.body.name
-    let myobj = { name: name };
-    customers.findOne(myobj, function (err, result) {
-        if (err) throw err;
-        db.close();
-        res.json(result)
-    });
+    let client;
+    try {
+        client = await MongoClient.connect(url, { useNewUrlParser: true });
+        const db = client.db(config.MONGODB_DB_NAME);
+        const customers = db.collection("customers");
 
-  
-})
+        const result = await customers.findOne({ name });
+        if (!result) {
+            return res.status(404).json({ status: "Error", message: "Customer not found." });
+        }
 
-// Vulnerable Authentication
-// Authentication Bypass Example
-// curl -X POST http://localhost:3000/customers/login/ --data "{\"email\": {\"\$gt\":\"\"} , \"password\": {\"\$gt\":\"\"}}" -H "Content-Type: application/json"
-
-const mongoSanitize = require('mongo-sanitize');
-
-router.post('/customers/login', async (req, res) => {
-    const client = await MongoClient.connect(url, { useNewUrlParser: true })
-        .catch(err => { console.log(err); });
-    if (!client) {
-        return res.json({ status: "Error" });
+        res.json({ status: "Success", data: result });
+    } catch (err) {
+        console.error("Find error:", err);
+        res.status(500).json({ status: "Error", message: "Internal server error." });
+    } finally {
+        if (client) client.close();
     }
-    const db = client.db(config.MONGODB_DB_NAME);
-    const customers = db.collection("customers");
+});
 
-    // Sanitize inputs
+// Customer login
+router.post('/customers/login', loginLimiter, async (req, res) => {
     const email = mongoSanitize(req.body.email);
     const password = mongoSanitize(req.body.password);
 
-    // Validate that inputs are strings
-    if (typeof email !== 'string' || typeof password !== 'string') {
-        db.close();
-        return res.status(400).json({ status: "Error", message: "Invalid input types." });
+    if (!validateStringInput(email) || !validateStringInput(password)) {
+        return res.status(400).json({ status: "Error", message: "Invalid input." });
     }
 
-    const myobj = { email: email, password: password };
-    customers.findOne(myobj, function (err, result) {
-        db.close();
-        if (err) {
-            return res.status(500).json({ status: "Error", message: "Database query failed." });
-        }
-        if (!result) {
+    let client;
+    try {
+        client = await MongoClient.connect(url, { useNewUrlParser: true });
+        const db = client.db(config.MONGODB_DB_NAME);
+        const customers = db.collection("customers");
+
+        const user = await customers.findOne({ email, password });
+        if (!user) {
             return res.status(401).json({ status: "Error", message: "Authentication failed." });
         }
-        res.json({ status: "Success", user: result });
-    });
+
+        res.json({ status: "Success", user });
+    } catch (err) {
+        console.error("Login error:", err);
+        res.status(500).json({ status: "Error", message: "Internal server error." });
+    } finally {
+        if (client) client.close();
+    }
 });
 
-
-module.exports = router
+module.exports = router;
